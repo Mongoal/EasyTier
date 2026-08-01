@@ -1,0 +1,184 @@
+name: Build (fork)
+
+# Fork-only workflow: build exactly three artifacts in parallel.
+#   - easytier-mobile-android-aarch64   (APK, from mobile.yml)
+#   - easytier-gui-windows-x86_64        (NSIS exe, from gui.yml)
+#   - easytier-linux-aarch64             (core, from core.yml)
+#
+# Recipes are copied 1:1 from the upstream mobile.yml / gui.yml / core.yml so the
+# outputs match official artifacts. Trigger manually on any branch, by pushing to
+# the `ci/build` branch, or by pushing a `build-*` tag.
+#
+# IMPORTANT: keep this file on a fork-only branch (e.g. ci/build). Do NOT commit
+# it to resolve-doh, so the upstream PR stays free of CI diff.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/build]
+    tags: ['build-*']
+
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash   # required for windows steps too
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. Android aarch64 APK  (mirror of mobile.yml, single ABI)
+  # ──────────────────────────────────────────────────────────────────────────
+  mobile-android-aarch64:
+    runs-on: ubuntu-latest
+    env:
+      ARCH: aarch64
+      TARGET: aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: oracle
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12.0
+          packages: 'build-tools;34.0.0 ndk;26.0.10792818 platform-tools platforms;android-34'
+
+      - name: Setup Android environment
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/ndk/26.0.10792818/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.0.10792818/" >> $GITHUB_ENV
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: 'false'
+          pnpm: 'true'
+          pnpm-build-filter: ''
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mobile-android-aarch64
+
+      - name: Build APK
+        run: |
+          cd easytier-gui
+          pnpm tauri android build --apk --target aarch64 --split-per-abi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-mobile-android-aarch64
+          path: easytier-gui/src-tauri/gen/android/app/build/outputs/apk/*/release/*.apk
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. Windows GUI x86_64  (mirror of gui.yml windows-x86_64 matrix entry)
+  # ──────────────────────────────────────────────────────────────────────────
+  gui-windows-x86_64:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: 'true'
+          pnpm: 'true'
+          pnpm-build-filter: ''
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gui-windows-x86_64
+
+      - name: Copy Windows DLLs
+        run: |
+          find "./easytier/third_party/x86_64" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) \
+            -exec cp {} ./easytier-gui/src-tauri/ \;
+
+      - name: Build GUI
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: ./easytier-gui
+          args: --verbose --target x86_64-pc-windows-msvc
+
+      - name: Collect artifact
+        run: |
+          mkdir -p ./artifacts
+          mv ./target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe ./artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-gui-windows-x86_64
+          path: ./artifacts/*
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. Linux core aarch64  (mirror of core.yml aarch64 entry; BUILD=build, no zig)
+  #    prepare-build (pnpm filter ./easytier-web/*) builds the frontend dist
+  #    inline, so no separate build_web job is needed.
+  # ──────────────────────────────────────────────────────────────────────────
+  linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    env:
+      TARGET: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: 'true'
+          pnpm: 'true'
+          # pnpm-build-filter intentionally omitted → defaults to ./easytier-web/*,
+          # building the web dashboard dist that `--features=embed` embeds.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-linux-aarch64
+
+      - name: Build core
+        run: |
+          cargo build --release --target "$TARGET" --package=easytier-web --features=embed
+          mv "./target/$TARGET/release/easytier-web" "./target/$TARGET/release/easytier-web-embed"
+          cargo build --release --target "$TARGET" --features=mimalloc
+
+      - name: Compress
+        run: |
+          mkdir -p ./artifacts
+          # runner is aarch64 → UPX arm64 build
+          UPX_VERSION=4.2.4
+          UPX_PKG="upx-${UPX_VERSION}-arm64_linux"
+          curl -L "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/${UPX_PKG}.tar.xz" -s | tar xJvf -
+          cp "${UPX_PKG}/upx" .
+          for BIN in ./target/"$TARGET"/release/easytier-{core,cli,web,web-embed}; do
+            if [[ -f "$BIN" ]]; then
+              ./upx --lzma --best "$BIN" || true
+              mv "$BIN" ./artifacts/
+            fi
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-linux-aarch64
+          path: ./artifacts/*
+          if-no-files-found: error
