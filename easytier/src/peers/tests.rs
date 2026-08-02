@@ -22,8 +22,7 @@ use crate::{
 };
 
 use super::{
-    PacketRecvChanReceiver,
-    create_packet_recv_chan,
+    PacketRecvChanReceiver, create_packet_recv_chan,
     peer_conn::tests::set_secure_mode_cfg,
     peer_manager::{PeerManager, RouteAlgoType},
     peer_map::PeerMap,
