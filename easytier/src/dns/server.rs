@@ -4,9 +4,9 @@ use crate::dns::system;
 use crate::dns::utils::addr::NameServerAddr;
 #[cfg(feature = "tun")]
 use crate::instance::instance::{ArcNicCtx, NicCtx};
+use crate::peers::peer_manager::PeerManager;
 #[cfg(feature = "tun")]
 use crate::peers::{NicPacketFilter, PacketRecvChan};
-use crate::peers::peer_manager::PeerManager;
 use crate::proto::dns::DnsNodeMgrRpcServer;
 use crate::proto::rpc_impl::standalone::StandAloneServer;
 use crate::tunnel::common::bind;
@@ -31,6 +31,7 @@ use hickory_server::{
     zone_handler::Catalog,
 };
 use itertools::chain;
+use parking_lot::RwLock;
 #[cfg(feature = "tun")]
 use pnet::packet::{
     MutablePacket, Packet,
@@ -39,7 +40,6 @@ use pnet::packet::{
     ipv4::{self, Ipv4Packet, MutableIpv4Packet},
     udp::{self, MutableUdpPacket, UdpPacket},
 };
-use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::net::IpAddr;
 #[cfg(feature = "tun")]
@@ -503,7 +503,13 @@ async fn resolve_dns_and_inject(
     };
     let response = serial.into_parts().0;
 
-    let packet = build_ipv4_udp(req_dst_ip, req_src_ip, req_dst_port, req_src_port, &response);
+    let packet = build_ipv4_udp(
+        req_dst_ip,
+        req_src_ip,
+        req_dst_port,
+        req_src_port,
+        &response,
+    );
     let _ = nic_channel.send(ZCPacket::new_with_payload(&packet)).await;
 }
 
@@ -659,19 +665,12 @@ mod tests {
     async fn nic_filter_answers_dns_query_to_hijack_address() {
         let (peer_mgr, mut nic_recv) = create_mock_peer_manager_with_recv().await;
         let global_ctx = peer_mgr.get_global_ctx();
-        let server = Arc::new(DnsServer::new(
-            peer_mgr,
-            global_ctx,
-            ArcNicCtx::default(),
-        ));
+        let server = Arc::new(DnsServer::new(peer_mgr, global_ctx, ArcNicCtx::default()));
         server.catalog.replace(build_test_catalog()).await;
-        server
-            .addresses
-            .write()
-            .insert(NameServerAddr {
-                protocol: Protocol::Udp,
-                addr: "100.100.100.101:53".parse().unwrap(),
-            });
+        server.addresses.write().insert(NameServerAddr {
+            protocol: Protocol::Udp,
+            addr: "100.100.100.101:53".parse().unwrap(),
+        });
 
         // Query: test.example.com A, from 10.0.0.2:12345 -> 100.100.100.101:53
         let query = build_dns_query_bytes("test.example.com");
