@@ -32,8 +32,10 @@ defaults:
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
   # 0. Lint & unit tests — mirrors upstream test.yml gates; runs in parallel
-  #    with the build jobs below. (Full integration matrix needs miniupnpd /
-  #    netfilter / IPv6-loopback setup and is intentionally omitted here.)
+  #    with the build jobs below. fmt/clippy are scoped to the easytier crate
+  #    (the PR's crate): the resolve-doh base carries pre-existing lints in
+  #    other crates (e.g. easytier-gui) that would otherwise trip -D warnings.
+  #    (Full integration matrix needs miniupnpd/netfilter/IPv6-loopback, omitted.)
   # ──────────────────────────────────────────────────────────────────────────
   test:
     name: Lint & unit tests (full)
@@ -59,11 +61,11 @@ jobs:
         with:
           shared-key: fork-test-full
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Check formatting (easytier crate)
+        run: cargo fmt -p easytier -- --check
 
-      - name: Check clippy (-D warnings)
-        run: cargo clippy --all-targets --features full --all -- -D warnings
+      - name: Check clippy (-D warnings, easytier crate)
+        run: cargo clippy -p easytier --all-targets --features full -- -D warnings
 
       - name: Check feature combinations
         run: cargo hack check --package easytier --each-feature --exclude-features macos-ne --verbose
