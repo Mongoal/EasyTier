@@ -1,4 +1,6 @@
 use crate::common::global_ctx::ArcGlobalCtx;
+#[cfg(feature = "tun")]
+use crate::common::global_ctx::GlobalCtxEvent;
 use crate::dns::node_mgr::DnsNodeMgr;
 use crate::dns::system;
 use crate::dns::utils::addr::NameServerAddr;
@@ -373,6 +375,27 @@ impl DnsServer {
             }
         };
 
+        // The TUN device can be (re)created at runtime — notably when DHCP resolves
+        // the IPv4 and EasyTier rebuilds the NIC (instance.rs). Hijack addresses
+        // were bound to the previous TUN and are now gone; on TunDeviceReady, forget
+        // the cached set so reload_addresses re-adds them to the new TUN (and rebinds).
+        #[cfg(feature = "tun")]
+        let on_tun_device_ready = async {
+            let mut events = self.global_ctx.subscribe();
+            loop {
+                match events.recv().await {
+                    Ok(GlobalCtxEvent::TunDeviceReady(..)) => {
+                        self.addresses.write().clear();
+                        dirty.addresses.mark();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
+                }
+            }
+        };
+        #[cfg(not(feature = "tun"))]
+        let on_tun_device_ready = std::future::pending::<()>();
+
         tokio::select!(
             _ = token.cancelled() => {
                 tracing::info!("DnsServer received shutdown signal, exiting server loop");
@@ -381,6 +404,7 @@ impl DnsServer {
             _ = reload_catalog => {},
             _ = reload_addresses => {},
             _ = reload_listeners => {},
+            _ = on_tun_device_ready => {},
         );
 
         #[cfg(feature = "tun")]
