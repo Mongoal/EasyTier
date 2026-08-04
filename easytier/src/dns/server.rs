@@ -376,15 +376,19 @@ impl DnsServer {
         };
 
         // The TUN device can be (re)created at runtime — notably when DHCP resolves
-        // the IPv4 and EasyTier rebuilds the NIC (instance.rs). Hijack addresses
-        // were bound to the previous TUN and are now gone; on TunDeviceReady, forget
-        // the cached set so reload_addresses re-adds them to the new TUN (and rebinds).
+        // the IPv4 and EasyTier rebuilds the NIC (instance.rs). TunDeviceReady fires
+        // inside NicCtx::run, BEFORE the new NicCtx is installed in the Arc, so the
+        // first reload may still see no NicCtx; DhcpIpv4Changed fires AFTER install.
+        // Forget the cached set on both so reload_addresses keeps retrying until the
+        // hijack address is actually added to the new TUN.
         #[cfg(feature = "tun")]
         let on_tun_device_ready = async {
             let mut events = self.global_ctx.subscribe();
             loop {
                 match events.recv().await {
-                    Ok(GlobalCtxEvent::TunDeviceReady(..)) => {
+                    Ok(
+                        GlobalCtxEvent::TunDeviceReady(..) | GlobalCtxEvent::DhcpIpv4Changed(..),
+                    ) => {
                         self.addresses.write().clear();
                         dirty.addresses.mark();
                     }
